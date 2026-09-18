@@ -7,6 +7,12 @@ speed, torque, tool wear, and real failure labels).
 Source (public mirror): https://raw.githubusercontent.com/michele-abruzzese/predictive_maintenance/main/predictive_maintenance.csv
 (Original dataset: UCI Machine Learning Repository / commonly hosted on Kaggle)
 
+ Workload (Process)	    What it represents in the plant	What it actually computes on the real data
+Failure-Detection-AI	  An AI service that watches machines for signs of failure	Scans its 2,500 machine records, counts how many actually failed, and breaks failures down by type (Power Failure, Overstrain, Tool Wear, etc.)
+Temperature-Monitor-AI	A thermal-monitoring service for equipment safety	Computes min/max/average air & process temperature across its machines, and logs every machine's readings
+Torque-Analysis-AI    	A mechanical-stress monitoring service	Computes average torque & rotational speed, and flags machines running above a safe torque threshold (overload risk)
+Tool-Wear-Risk-AI	      A predictive-maintenance service	Computes average/max tool wear and flags machines that have worn past a threshold and likely need servicing soon
+
 What this script does:
   1. Downloads the real CSV (or reuses it if already downloaded) and
      splits it into 4 chunks -- one per "industrial AI workload".
