@@ -1,34 +1,62 @@
 """
-Industrial AI Workload Management Platform — Extended Demo
--------------------------------------------------------------
-This version goes a step further than a toy simulation:
+Industrial AI Workload Management Platform — Demo with REAL Data
+---------------------------------------------------------------------
+Uses the real AI4I 2020 Predictive Maintenance Dataset (10,000 actual
+industrial machine sensor readings: air/process temperature, rotational
+speed, torque, tool wear, and real failure labels).
+Source (public mirror): https://raw.githubusercontent.com/michele-abruzzese/predictive_maintenance/main/predictive_maintenance.csv
+(Original dataset: UCI Machine Learning Repository / commonly hosted on Kaggle)
 
-  1. Defines REAL workloads that do actual work (write text files,
-     compute hashes/checksums, do number-crunching) instead of just
-     sleeping.
-  2. Evaluates several CPU scheduling algorithms (FCFS, SJF, Priority,
-     Round Robin) on paper first -- computing Waiting Time / Turnaround
-     Time / Completion Time for each -- to decide which one is "best"
-     (lowest average waiting time).
-  3. Actually EXECUTES the workloads for real, in the order chosen by
-     the winning algorithm, using threads + a Lock for synchronization.
-  4. Prints a final statistics table (scheduling stats + real execution
-     time + output files produced).
+What this script does:
+  1. Downloads the real CSV (or reuses it if already downloaded) and
+     splits it into 4 chunks -- one per "industrial AI workload".
+  2. Each workload is a REAL process that does real analysis on its
+     chunk of real machine data (failure counting, torque/temperature
+     stats, tool-wear risk scoring, per-failure-type breakdown) and
+     writes the results to a text file.
+  3. Evaluates FCFS, SJF, Priority, and Round Robin scheduling (on
+     paper, using estimated burst times) and picks the one with the
+     lowest average waiting time.
+  4. Actually executes the workloads for real, concurrently, in the
+     order the winning algorithm chose, synchronized with a Lock.
+  5. Prints final statistics: scheduling stats + real execution time +
+     the actual analysis results pulled from real data.
 
 Run:  python workload_demo.py
 Output text files are written to ./workload_outputs/
 """
 
 import os
+import csv
 import time
-import random
-import hashlib
 import threading
+import urllib.request
 from dataclasses import dataclass, field
 from queue import Queue
 
+DATA_URL = "https://raw.githubusercontent.com/michele-abruzzese/predictive_maintenance/main/predictive_maintenance.csv"
+DATA_FILE = "predictive_maintenance.csv"
 OUTPUT_DIR = "workload_outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 0. Fetch the real dataset (once) and split it into 4 chunks
+# ---------------------------------------------------------------------------
+def load_real_dataset():
+    if not os.path.exists(DATA_FILE):
+        print(f"[Data] Downloading real dataset from {DATA_URL} ...")
+        urllib.request.urlretrieve(DATA_URL, DATA_FILE)
+    with open(DATA_FILE, encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    print(f"[Data] Loaded {len(rows)} real machine sensor readings "
+          f"(AI4I 2020 Predictive Maintenance Dataset)")
+    return rows
+
+
+def split_into_chunks(rows, n=4):
+    size = len(rows) // n
+    return [rows[i * size: (i + 1) * size] for i in range(n)]
 
 
 # ---------------------------------------------------------------------------
@@ -38,13 +66,13 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 class PCB:
     pid: int
     name: str
-    burst_time: int              # estimated CPU ticks needed (used for scheduling)
-    priority: int                # lower number = higher priority
+    burst_time: int
+    priority: int
     arrival_time: int = 0
-    work_fn: callable = None     # the REAL function this workload will run
+    work_fn: callable = None
+    data_chunk: list = None
     state: str = "NEW"
     remaining_time: int = field(init=False)
-    # stats filled in after scheduling / execution
     start_time: float = None
     completion_time: float = None
     real_duration: float = None
@@ -55,49 +83,74 @@ class PCB:
 
 
 # ---------------------------------------------------------------------------
-# 2. REAL work functions each workload will actually perform
+# 2. REAL work functions -- each does real analysis on real machine data
 # ---------------------------------------------------------------------------
-def work_generate_report(pcb: PCB):
-    """Simulates an inspection-AI writing a report file."""
-    path = os.path.join(OUTPUT_DIR, f"{pcb.name}_report.txt")
+def work_failure_scan(pcb: PCB):
+    """Counts real machine failures and breaks them down by failure type."""
+    rows = pcb.data_chunk
+    failures = [r for r in rows if r["Target"] == "1"]
+    by_type = {}
+    for r in failures:
+        by_type[r["Failure Type"]] = by_type.get(r["Failure Type"], 0) + 1
+
+    path = os.path.join(OUTPUT_DIR, f"{pcb.name}_failure_scan.txt")
     with open(path, "w") as f:
-        for i in range(50000):
-            f.write(f"[{pcb.name}] inspection log line {i}: status=OK\n")
-    pcb.result = f"wrote {path}"
+        f.write(f"Machines scanned: {len(rows)}\n")
+        f.write(f"Failures found: {len(failures)}\n")
+        f.write("Breakdown by failure type:\n")
+        for ftype, count in sorted(by_type.items(), key=lambda x: -x[1]):
+            f.write(f"  {ftype}: {count}\n")
+    pcb.result = f"{len(failures)} failures / {len(rows)} machines scanned"
 
 
-def work_compute_checksum(pcb: PCB):
-    """Simulates a predictive-maintenance-AI hashing sensor data."""
-    data = os.urandom(2_000_000)
-    digest = hashlib.sha256(data).hexdigest()
-    path = os.path.join(OUTPUT_DIR, f"{pcb.name}_checksum.txt")
+def work_temperature_stats(pcb: PCB):
+    """Computes real air/process temperature statistics."""
+    rows = pcb.data_chunk
+    air = [float(r["Air temperature [K]"]) for r in rows]
+    proc = [float(r["Process temperature [K]"]) for r in rows]
+
+    path = os.path.join(OUTPUT_DIR, f"{pcb.name}_temperature_stats.txt")
     with open(path, "w") as f:
-        f.write(f"SHA256 of sensor batch: {digest}\n")
-    pcb.result = f"checksum={digest[:12]}..."
+        f.write(f"Air temp   -> min={min(air):.1f}K max={max(air):.1f}K avg={sum(air)/len(air):.2f}K\n")
+        f.write(f"Process temp -> min={min(proc):.1f}K max={max(proc):.1f}K avg={sum(proc)/len(proc):.2f}K\n")
+        f.write("Per-machine readings:\n")
+        for r in rows:
+            f.write(f"  {r['Product ID']}: air={r['Air temperature [K]']}K "
+                    f"process={r['Process temperature [K]']}K\n")
+    pcb.result = f"avg_air={sum(air)/len(air):.2f}K, avg_process={sum(proc)/len(proc):.2f}K"
 
 
-def work_number_crunch(pcb: PCB):
-    """Simulates a robotic-arm-control-AI doing trajectory calculations."""
-    total = 0.0
-    for i in range(3_000_000):
-        total += (i ** 0.5) * 0.0001
-    path = os.path.join(OUTPUT_DIR, f"{pcb.name}_trajectory.txt")
+def work_torque_analysis(pcb: PCB):
+    """Analyzes real torque & rotational speed to flag overload risk."""
+    rows = pcb.data_chunk
+    torque = [float(r["Torque [Nm]"]) for r in rows]
+    rpm = [float(r["Rotational speed [rpm]"]) for r in rows]
+    high_torque_risk = [r for r in rows if float(r["Torque [Nm]"]) > 55]
+
+    path = os.path.join(OUTPUT_DIR, f"{pcb.name}_torque_analysis.txt")
     with open(path, "w") as f:
-        f.write(f"Computed trajectory value: {total:.4f}\n")
-    pcb.result = f"trajectory_value={total:.4f}"
+        f.write(f"Avg torque: {sum(torque)/len(torque):.2f} Nm\n")
+        f.write(f"Avg rotational speed: {sum(rpm)/len(rpm):.1f} rpm\n")
+        f.write(f"Machines with high torque (>55 Nm, overload risk): {len(high_torque_risk)}\n")
+        for r in high_torque_risk:
+            f.write(f"  {r['Product ID']}: torque={r['Torque [Nm]']}Nm rpm={r['Rotational speed [rpm]']}\n")
+    pcb.result = f"avg_torque={sum(torque)/len(torque):.2f}Nm, high_risk_count={len(high_torque_risk)}"
 
 
-def work_quality_scan(pcb: PCB):
-    """Simulates a quality-check-AI scanning a batch of 'products'."""
-    path = os.path.join(OUTPUT_DIR, f"{pcb.name}_scan.txt")
-    defects = 0
+def work_tool_wear_risk(pcb: PCB):
+    """Scores real tool-wear data to flag machines needing maintenance soon."""
+    rows = pcb.data_chunk
+    wear = [int(r["Tool wear [min]"]) for r in rows]
+    at_risk = [r for r in rows if int(r["Tool wear [min]"]) > 200]
+
+    path = os.path.join(OUTPUT_DIR, f"{pcb.name}_tool_wear_risk.txt")
     with open(path, "w") as f:
-        for i in range(20000):
-            ok = random.random() > 0.02
-            if not ok:
-                defects += 1
-            f.write(f"product_{i}: {'PASS' if ok else 'DEFECT'}\n")
-    pcb.result = f"defects_found={defects}"
+        f.write(f"Avg tool wear: {sum(wear)/len(wear):.1f} min\n")
+        f.write(f"Max tool wear: {max(wear)} min\n")
+        f.write(f"Machines needing maintenance soon (wear > 200min): {len(at_risk)}\n")
+        for r in at_risk:
+            f.write(f"  {r['Product ID']}: wear={r['Tool wear [min]']}min type={r['Type']}\n")
+    pcb.result = f"avg_wear={sum(wear)/len(wear):.1f}min, at_risk_count={len(at_risk)}"
 
 
 # ---------------------------------------------------------------------------
@@ -108,14 +161,14 @@ class ProcessManager:
         self.processes = []
         self._next_pid = 1
 
-    def submit_workload(self, name, burst_time, priority, work_fn):
+    def submit_workload(self, name, burst_time, priority, work_fn, data_chunk):
         pcb = PCB(pid=self._next_pid, name=name, burst_time=burst_time,
-                  priority=priority, work_fn=work_fn)
+                  priority=priority, work_fn=work_fn, data_chunk=data_chunk)
         pcb.state = "READY"
         self.processes.append(pcb)
         self._next_pid += 1
         print(f"[ProcessManager] Submitted {name} (PID={pcb.pid}, "
-              f"est_burst={burst_time}, priority={priority})")
+              f"est_burst={burst_time}, priority={priority}, rows={len(data_chunk)})")
         return pcb
 
 
@@ -123,18 +176,15 @@ class ProcessManager:
 # 4. Scheduling algorithm EVALUATION (on paper, using estimated burst times)
 # ---------------------------------------------------------------------------
 def evaluate_fcfs(processes):
-    order = list(processes)  # arrival order
-    return _compute_stats(order)
+    return _compute_stats(list(processes))
 
 
 def evaluate_sjf(processes):
-    order = sorted(processes, key=lambda p: p.burst_time)
-    return _compute_stats(order)
+    return _compute_stats(sorted(processes, key=lambda p: p.burst_time))
 
 
 def evaluate_priority(processes):
-    order = sorted(processes, key=lambda p: p.priority)
-    return _compute_stats(order)
+    return _compute_stats(sorted(processes, key=lambda p: p.priority))
 
 
 def evaluate_round_robin(processes, quantum=3):
@@ -169,8 +219,7 @@ def evaluate_round_robin(processes, quantum=3):
 
 def _compute_stats(order):
     clock = 0
-    waits, turns = [], []
-    names = []
+    waits, turns, names = [], [], []
     for p in order:
         waiting = clock - p.arrival_time
         clock += p.burst_time
@@ -209,7 +258,7 @@ def choose_best_algorithm(processes):
 # ---------------------------------------------------------------------------
 # 5. REAL execution using the chosen algorithm's order, with synchronization
 # ---------------------------------------------------------------------------
-resource_lock = threading.Lock()  # guards shared console output ("shared resource")
+resource_lock = threading.Lock()
 
 
 def execute_process(pcb: PCB):
@@ -217,10 +266,9 @@ def execute_process(pcb: PCB):
     pcb.start_time = time.time()
     t0 = time.time()
 
-    pcb.work_fn(pcb)  # <-- the REAL work happens here
+    pcb.work_fn(pcb)  # real analysis on real data happens here
 
-    t1 = time.time()
-    pcb.real_duration = t1 - t0
+    pcb.real_duration = time.time() - t0
     pcb.completion_time = time.time()
     pcb.state = "TERMINATED"
 
@@ -240,11 +288,10 @@ def run_with_best_order(processes, order_names):
         t = threading.Thread(target=execute_process, args=(pcb,))
         threads.append(t)
         t.start()
-        time.sleep(0.05)  # stagger start slightly, like a scheduler dispatching
+        time.sleep(0.05)
     for t in threads:
         t.join()
-    total_wall_time = time.time() - start_clock
-    return total_wall_time
+    return time.time() - start_clock
 
 
 # ---------------------------------------------------------------------------
@@ -257,9 +304,9 @@ def print_final_stats(processes, best_algo, best_stats, total_wall_time):
     print(f"Predicted avg turnaround    : {best_stats['avg_turnaround']:.2f} ticks")
     print(f"Actual total wall-clock time: {total_wall_time:.3f} seconds\n")
 
-    print(f"{'Workload':<28}{'PID':<5}{'Priority':<10}{'RealTime(s)':<13}{'Result'}")
+    print(f"{'Workload':<24}{'PID':<5}{'Priority':<10}{'RealTime(s)':<13}{'Result (from real data)'}")
     for p in processes:
-        print(f"{p.name:<28}{p.pid:<5}{p.priority:<10}{p.real_duration:<13.3f}{p.result}")
+        print(f"{p.name:<24}{p.pid:<5}{p.priority:<10}{p.real_duration:<13.3f}{p.result}")
 
     print(f"\nOutput files written to ./{OUTPUT_DIR}/:")
     for f in sorted(os.listdir(OUTPUT_DIR)):
@@ -271,17 +318,25 @@ def print_final_stats(processes, best_algo, best_stats, total_wall_time):
 # Demo driver
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    print("=== Industrial AI Workload Management Platform — Extended Demo ===\n")
+    print("=== Industrial AI Workload Management Platform — Demo (Real Dataset) ===\n")
+
+    rows = load_real_dataset()
+    chunks = split_into_chunks(rows, n=4)
 
     pm = ProcessManager()
-    pm.submit_workload("Quality-Check-AI", burst_time=2, priority=1, work_fn=work_quality_scan)
-    pm.submit_workload("Vision-Inspection-AI", burst_time=5, priority=2, work_fn=work_generate_report)
-    pm.submit_workload("Predictive-Maintenance-AI", burst_time=3, priority=1, work_fn=work_compute_checksum)
-    pm.submit_workload("Robotic-Arm-Control-AI", burst_time=4, priority=3, work_fn=work_number_crunch)
+    pm.submit_workload("Failure-Detection-AI", burst_time=2, priority=1,
+                        work_fn=work_failure_scan, data_chunk=chunks[0])
+    pm.submit_workload("Temperature-Monitor-AI", burst_time=5, priority=2,
+                        work_fn=work_temperature_stats, data_chunk=chunks[1])
+    pm.submit_workload("Torque-Analysis-AI", burst_time=3, priority=1,
+                        work_fn=work_torque_analysis, data_chunk=chunks[2])
+    pm.submit_workload("Tool-Wear-Risk-AI", burst_time=4, priority=3,
+                        work_fn=work_tool_wear_risk, data_chunk=chunks[3])
 
     best_algo, best_stats = choose_best_algorithm(pm.processes)
     total_wall_time = run_with_best_order(pm.processes, best_stats["order"])
     print_final_stats(pm.processes, best_algo, best_stats, total_wall_time)
 
-    print("\nDemo complete: workloads were scheduled, compared across algorithms,")
-    print("and then actually executed doing real work (files written, hashes computed).")
+    print("\nDemo complete: real industrial machine sensor data (AI4I 2020 dataset) was")
+    print("split across 4 AI workloads, scheduled using the best-performing algorithm,")
+    print("and actually analyzed -- producing real failure/temperature/torque/wear reports.")
